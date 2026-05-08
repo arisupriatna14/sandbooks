@@ -35,13 +35,21 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 
 ---
 
-### Bagian 4 — Ekosistem & Tooling
+### Bagian 4 — State Management & UI
 
 | # | File | Topik |
 |---|---|---|
-| 9 | [swift6-swift-testing.md](swift6-swift-testing.md) | Swift Testing — `@Test`, `@Suite`, `#expect`, `#require`, parameterized tests, tags, traits, dan migrasi dari XCTest |
-| 10 | [swift6-package-access-level.md](swift6-package-access-level.md) | Package Access Level — keyword `package`, arsitektur multi-modul SPM, berbagi implementasi antar modul tanpa ekspos ke publik |
-| 11 | [swift6-conditional-compilation.md](swift6-conditional-compilation.md) | Conditional Compilation — menggunakan fitur Swift 6 di project Swift 5, strategi migrasi bertahap 5 fase, compatibility layer |
+| 9 | [swift6-observable.md](swift6-observable.md) | Observable — `@Observable` macro, fine-grained dependency tracking, `@Bindable`, `withObservationTracking`, integrasi UIKit, perbandingan dengan `ObservableObject` |
+
+---
+
+### Bagian 5 — Ekosistem & Tooling
+
+| # | File | Topik |
+|---|---|---|
+| 10 | [swift6-swift-testing.md](swift6-swift-testing.md) | Swift Testing — `@Test`, `@Suite`, `#expect`, `#require`, parameterized tests, tags, traits, dan migrasi dari XCTest |
+| 11 | [swift6-package-access-level.md](swift6-package-access-level.md) | Package Access Level — keyword `package`, arsitektur multi-modul SPM, berbagi implementasi antar modul tanpa ekspos ke publik |
+| 12 | [swift6-conditional-compilation.md](swift6-conditional-compilation.md) | Conditional Compilation — menggunakan fitur Swift 6 di project Swift 5, strategi migrasi bertahap 5 fase, compatibility layer |
 
 ---
 
