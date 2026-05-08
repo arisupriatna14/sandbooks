@@ -22,6 +22,9 @@
 13. [Swift Concurrency: TaskGroup — Bulk Avatar Prefetch](#13-swift-concurrency-taskgroup--bulk-avatar-prefetch)
 14. [Swift Concurrency: AsyncStream — Live Polling](#14-swift-concurrency-asyncstream--live-polling)
 15. [Swift Concurrency: withCheckedContinuation — Bridge Delegate](#15-swift-concurrency-withcheckedcontinuation--bridge-delegate)
+16. [Observable dalam VIP UIKit — Motivasi & Arsitektur](#16-observable-dalam-vip-uikit--motivasi--arsitektur)
+17. [Implementasi Observable VIP — DisplayState Pattern](#17-implementasi-observable-vip--displaystate-pattern)
+18. [Trade-offs: Pure VIP vs Observable VIP](#18-trade-offs-pure-vip-vs-observable-vip)
 
 ---
 
@@ -1881,6 +1884,812 @@ func uploadAvatar() async {
 - Callback bisa dipanggil berkali-kali → gunakan `AsyncStream`
 - API sudah punya versi async (`URLSession.data(for:)`, `PHPickerViewController` dengan async) → gunakan langsung
 - Untuk Combine publisher → gunakan `AsyncPublisher` atau `values` property
+
+---
+
+## 16. Observable dalam VIP UIKit — Motivasi & Arsitektur
+
+### Masalah yang Ingin Dipecahkan
+
+Pada VIP murni (section 1–10), Presenter berkomunikasi ke ViewController melalui **protocol delegate**:
+
+```swift
+// Pure VIP — Presenter memanggil ViewController secara langsung
+@MainActor
+final class UserListPresenter: UserListPresentationLogic {
+    weak var viewController: (any UserListDisplayLogic)?  // ← weak untuk cegah retain cycle
+
+    func presentUsers(_ response: UserList.FetchUsers.Response) {
+        // format...
+        viewController?.displayUsers(viewModel)  // ← panggil method VC langsung
+    }
+}
+```
+
+Pendekatan ini solid, tapi ada beberapa friction:
+
+1. **Retain cycle** — Presenter harus menyimpan `weak var viewController`. Jika lupa `weak`, terjadi retain cycle. Kalau `weak`, bisa jadi `nil` di waktu yang tidak terduga.
+2. **Coupling implisit** — Presenter harus tahu _kapan_ memanggil method mana. Urutan pemanggilan penting: `presentLoading(true)` harus sebelum `presentUsers`, harus sebelum `presentLoading(false)`. Tidak ada enforcement dari compiler.
+3. **Testing Presenter** membutuhkan `MockViewController` — kita perlu membuat spy/mock yang merekam method call, padahal yang sebenarnya ingin kita uji adalah: "apakah data diformat dengan benar?"
+
+### Ide: Ganti Protocol Delegate dengan @Observable DisplayState
+
+Alih-alih Presenter _memanggil_ ViewController, kita ubah menjadi: Presenter _memperbarui state_, ViewController _mengobservasi state_.
+
+```
+Pure VIP:
+  Interactor ──await──▶ Presenter ──memanggil──▶ ViewController
+                        (push model: Presenter aktif memutuskan kapan VC di-update)
+
+Observable VIP:
+  Interactor ──await──▶ Presenter ──update──▶ DisplayState ◀──observe── ViewController
+                        (state model: VC reaktif, otomatis update saat state berubah)
+```
+
+### Arsitektur Baru: DisplayState Pattern
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          @MainActor                                 │
+│  ┌──────────────────┐          ┌──────────────────────────────────┐ │
+│  │  ViewController  │─────────▶│           Router                 │ │
+│  │  (UI only)       │          │  (navigasi UIKit)                │ │
+│  └────────┬─────────┘          └──────────────────────────────────┘ │
+│           │ observes (withObservationTracking)                       │
+│           ▼                                                          │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │             UserListDisplayState  (@Observable)              │   │
+│  │                                                              │   │
+│  │  var displayedUsers: [DisplayedUser]                         │   │
+│  │  var isLoading: Bool                                         │   │
+│  │  var pendingError: String?       ← one-time event            │   │
+│  │  var pendingNavigation: ViewModel? ← one-time event          │   │
+│  └───────────────────▲──────────────────────────────────────────┘   │
+│                      │ update properties                            │
+│  ┌───────────────────┴──────────────────────────────────────────┐   │
+│  │             Presenter  (@MainActor)                          │   │
+│  │  let displayState = UserListDisplayState()                   │   │
+│  │  ← TIDAK ada weak var viewController lagi                    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+            ▲ await presenter.presentUsers(response)
+            │
+┌───────────┴──────────────────────────────────────────────────────┐
+│                    actor  Interactor                              │
+│  (business logic, tidak berubah dari pure VIP)                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Perubahan Per Komponen
+
+| Komponen | Pure VIP | Observable VIP |
+|---|---|---|
+| **Presenter** | `weak var viewController?`, panggil method langsung | `let displayState`, update property |
+| **ViewController** | Implement `UserListDisplayLogic` protocol | Observe `displayState` via `withObservationTracking` |
+| **Protocol** | `UserListDisplayLogic` penuh | `UserListDisplayLogic` bisa dihapus atau disederhanakan |
+| **Configurator** | `presenter.viewController = viewController` | `viewController.configure(displayState: presenter.displayState)` |
+| **Retain cycle** | Perlu `weak` | Tidak ada — VC tidak di-hold oleh Presenter |
+| **iOS minimum** | iOS 15 (async/await) | iOS 17 (`@Observable`) |
+
+---
+
+## 17. Implementasi Observable VIP — DisplayState Pattern
+
+### Step 1: UserListDisplayState — Jembatan antara Presenter dan View
+
+```swift
+import Observation
+
+// DisplayState adalah satu-satunya sumber kebenaran untuk tampilan layar ini.
+// @Observable: setiap perubahan property otomatis dideteksi oleh observer.
+// @MainActor: selalu diakses dari main thread — konsisten dengan UIKit.
+@Observable
+@MainActor
+final class UserListDisplayState {
+
+    // State reguler — berubah berkali-kali sepanjang lifecycle layar
+    var displayedUsers: [UserList.FetchUsers.ViewModel.DisplayedUser] = []
+    var isLoading: Bool = false
+
+    // "Pending" events — one-time actions yang harus dikonsumsi ViewController
+    // dan di-reset segera setelah ditangani.
+    //
+    // Mengapa "pending" bukan state biasa?
+    // Error dan navigasi adalah PERINTAH (commands), bukan state.
+    // Jika kita simpan sebagai state permanen, error akan ditampilkan ulang
+    // setiap kali applyState() terpanggil akibat perubahan property lain.
+    var pendingError: String? = nil
+    var pendingNavigation: UserList.SelectUser.ViewModel? = nil
+}
+```
+
+### Step 2: Protocol (Disederhanakan)
+
+```swift
+// UserListDisplayLogic tidak lagi dibutuhkan — Presenter tidak memanggil VC.
+// Kita bisa hapus protocol ini, atau pertahankan hanya jika butuh interoperabilitas
+// dengan Pure VIP di modul lain.
+//
+// Yang tetap dibutuhkan:
+protocol UserListBusinessLogic: AnyObject, Sendable {
+    func fetchUsers(request: UserList.FetchUsers.Request) async
+    func selectUser(request: UserList.SelectUser.Request) async
+}
+
+protocol UserListPresentationLogic: AnyObject {
+    func presentUsers(_ response: UserList.FetchUsers.Response)
+    func presentLoading(_ isLoading: Bool)
+    func presentError(_ error: Error)
+    func presentSelectedUser(_ response: UserList.SelectUser.Response)
+}
+
+// UserListDataStore dan UserListRoutingLogic tidak berubah dari Pure VIP.
+```
+
+### Step 3: Presenter — Update State, Bukan Panggil VC
+
+```swift
+import UIKit
+
+// Presenter tidak lagi tahu keberadaan ViewController.
+// Tugasnya sama: format Response → ViewModel.
+// Bedanya: hasil format disimpan ke displayState, bukan dikirim ke VC.
+@MainActor
+final class UserListPresenter: UserListPresentationLogic {
+
+    // DisplayState dimiliki Presenter — Presenter yang menciptakan dan mengupdate-nya.
+    // ViewController mendapat referensi ke object ini via Configurator.
+    // Tidak ada lagi 'weak var viewController' — tidak ada retain cycle.
+    let displayState = UserListDisplayState()
+
+    // MARK: - UserListPresentationLogic
+
+    func presentUsers(_ response: UserList.FetchUsers.Response) {
+        // Formatting logic sama persis dengan Pure VIP — tidak ada yang berubah.
+        let displayedUsers = response.users.map { user in
+            UserList.FetchUsers.ViewModel.DisplayedUser(
+                id: user.id,
+                fullName: user.name
+                    .split(separator: " ")
+                    .map { $0.capitalized }
+                    .joined(separator: " "),
+                emailLabel: user.email.lowercased(),
+                avatarURL: user.avatarURL
+            )
+        }
+        // Alih-alih: viewController?.displayUsers(viewModel)
+        // Kita update state — observer akan merespons secara otomatis.
+        displayState.displayedUsers = displayedUsers
+    }
+
+    func presentLoading(_ isLoading: Bool) {
+        displayState.isLoading = isLoading
+    }
+
+    func presentError(_ error: Error) {
+        // Set pending error — ViewController akan menampilkan dan langsung me-reset.
+        // Jika sudah ada pendingError yang belum dikonsumsi, timpa saja —
+        // error terbaru lebih relevan.
+        displayState.pendingError = error.localizedDescription
+    }
+
+    func presentSelectedUser(_ response: UserList.SelectUser.Response) {
+        displayState.pendingNavigation = UserList.SelectUser.ViewModel(
+            userId: response.selectedUser.id,
+            userName: response.selectedUser.name
+        )
+    }
+}
+```
+
+### Step 4: ViewController — Observe DisplayState
+
+```swift
+import UIKit
+import Observation
+
+// ViewController tidak lagi mengimplementasikan UserListDisplayLogic.
+// Sebagai gantinya, ia mengobservasi displayState dan merespons perubahan.
+@MainActor
+final class UserListViewController: UIViewController {
+
+    // MARK: - VIP References
+
+    var interactor: (any UserListBusinessLogic)?
+    var router: (any UserListRoutingLogic)?
+
+    // DisplayState datang dari Configurator — dimiliki Presenter, dibaca VC.
+    // Private(set) agar hanya Configurator yang bisa inject via configure().
+    private var displayState: UserListDisplayState?
+
+    // Task untuk observasi — di-cancel saat view hilang.
+    private var observationTask: Task<Void, Never>?
+
+    // Cache lokal untuk diffing (mencegah reloadData yang tidak perlu)
+    private var currentDisplayedUsers: [UserList.FetchUsers.ViewModel.DisplayedUser] = []
+
+    // MARK: - UI Components (sama seperti Pure VIP)
+
+    private lazy var tableView: UITableView = {
+        let table = UITableView(frame: .zero, style: .plain)
+        table.register(UserCell.self, forCellReuseIdentifier: UserCell.reuseID)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        table.delegate = self
+        table.dataSource = self
+        return table
+    }()
+
+    private lazy var activityIndicator: UIActivityIndicatorView = {
+        let indicator = UIActivityIndicatorView(style: .large)
+        indicator.hidesWhenStopped = true
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        return indicator
+    }()
+
+    private lazy var refreshControl: UIRefreshControl = {
+        let control = UIRefreshControl()
+        control.addAction(UIAction { [weak self] _ in self?.handleRefresh() }, for: .valueChanged)
+        return control
+    }()
+
+    // MARK: - Configuration (dipanggil oleh Configurator)
+
+    // Inject displayState dari luar — VC tidak pernah membuat displayState sendiri.
+    func configure(displayState: UserListDisplayState) {
+        self.displayState = displayState
+    }
+
+    // MARK: - Lifecycle
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupUI()
+        startObserving()   // mulai observe SEBELUM fetch — jangan sampai ada state update yang terlewat
+        fetchUsers()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        observationTask?.cancel()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // Restart observasi jika sebelumnya di-cancel saat viewWillDisappear
+        if observationTask == nil || observationTask?.isCancelled == true {
+            startObserving()
+        }
+    }
+
+    // MARK: - Observation
+
+    private func startObserving() {
+        guard let displayState else { return }
+
+        observationTask = Task { @MainActor [weak self] in
+            // Bungkus withObservationTracking dalam AsyncStream untuk continuous tracking.
+            // withObservationTracking sendiri adalah "fire-once" — kita perlu re-register
+            // setiap kali onChange dipanggil.
+            let changes = AsyncStream<Void> { continuation in
+                func track() {
+                    withObservationTracking {
+                        // Akses semua property yang ingin di-track.
+                        // SwiftUI melakukan ini secara otomatis di body,
+                        // tapi di UIKit kita harus eksplisit.
+                        _ = displayState.displayedUsers
+                        _ = displayState.isLoading
+                        _ = displayState.pendingError
+                        _ = displayState.pendingNavigation
+                    } onChange: {
+                        // Dipanggil satu kali ketika SALAH SATU property berubah.
+                        continuation.yield(())
+                        // Re-register untuk menangkap perubahan berikutnya.
+                        // Task untuk menjamin ini berjalan di @MainActor.
+                        Task { @MainActor in track() }
+                    }
+                }
+                track()  // Mulai tracking sekarang
+
+                continuation.onTermination = { _ in }  // cleanup jika stream di-terminate
+            }
+
+            for await _ in changes {
+                guard !Task.isCancelled else { break }
+                self?.applyState()
+            }
+        }
+    }
+
+    // Dipanggil setiap kali ADA property di displayState yang berubah.
+    // Fungsi ini idempoten — aman dipanggil berkali-kali dengan state yang sama.
+    private func applyState() {
+        guard let state = displayState else { return }
+
+        // --- Regular state (idempoten) ---
+
+        // Hanya reload jika ada perubahan nyata — mencegah scroll jump yang tidak perlu.
+        if state.displayedUsers != currentDisplayedUsers {
+            currentDisplayedUsers = state.displayedUsers
+            tableView.reloadData()
+        }
+
+        if state.isLoading {
+            activityIndicator.startAnimating()
+        } else {
+            activityIndicator.stopAnimating()
+            refreshControl.endRefreshing()
+        }
+
+        // --- One-time events (consume and reset) ---
+        // PENTING: reset SEBELUM aksi, bukan setelah.
+        // Jika reset setelah aksi (misal setelah present alert), ada risiko applyState()
+        // dipanggil lagi dari tempat lain sebelum reset selesai — double alert.
+
+        if let message = state.pendingError {
+            // Reset segera — mencegah error muncul dua kali jika applyState dipanggil ulang
+            displayState?.pendingError = nil
+            showErrorAlert(message: message)
+        }
+
+        if let nav = state.pendingNavigation {
+            // Reset segera — mencegah double navigation
+            displayState?.pendingNavigation = nil
+            router?.routeToUserDetail(userId: nav.userId, userName: nav.userName)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func fetchUsers() {
+        Task { await interactor?.fetchUsers(request: UserList.FetchUsers.Request()) }
+    }
+
+    private func handleRefresh() {
+        Task { await interactor?.fetchUsers(request: UserList.FetchUsers.Request()) }
+    }
+
+    private func showErrorAlert(message: String) {
+        let alert = UIAlertController(title: "Oops!", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Coba Lagi", style: .default) { [weak self] _ in
+            self?.fetchUsers()
+        })
+        alert.addAction(UIAlertAction(title: "Tutup", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    // MARK: - Setup
+
+    private func setupUI() {
+        title = "Users"
+        view.backgroundColor = .systemBackground
+        tableView.refreshControl = refreshControl
+        view.addSubview(tableView)
+        view.addSubview(activityIndicator)
+        NSLayoutConstraint.activate([
+            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+    }
+}
+
+// MARK: - UITableViewDataSource & Delegate
+
+extension UserListViewController: UITableViewDataSource, UITableViewDelegate {
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        currentDisplayedUsers.count
+    }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: UserCell.reuseID, for: indexPath) as! UserCell
+        cell.configure(with: currentDisplayedUsers[indexPath.row])
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        Task { await interactor?.selectUser(request: UserList.SelectUser.Request(index: indexPath.row)) }
+    }
+}
+```
+
+> **Mengapa `DisplayedUser` harus `Equatable`?**
+> `applyState()` membandingkan `state.displayedUsers != currentDisplayedUsers` untuk menghindari `reloadData()` yang tidak perlu. Tambahkan `Equatable` ke `DisplayedUser`:
+>
+> ```swift
+> struct DisplayedUser: Sendable, Equatable {
+>     let id: String
+>     let fullName: String
+>     let emailLabel: String
+>     let avatarURL: URL?
+> }
+> ```
+
+### Step 5: Configurator — Wiring Tanpa Circular Reference
+
+```swift
+@MainActor
+enum UserListConfigurator {
+
+    static func makeViewController() -> UserListViewController {
+
+        // 1. Buat semua komponen
+        let viewController = UserListViewController()
+        let interactor = UserListInteractor()
+        let presenter = UserListPresenter()
+        let router = UserListRouter()
+
+        // 2. Inject displayState ke ViewController
+        //    Presenter yang memiliki displayState — VC hanya membacanya.
+        //    Tidak ada lagi: presenter.viewController = viewController
+        //    Sehingga tidak ada circular reference sama sekali.
+        viewController.configure(displayState: presenter.displayState)
+
+        // 3. Wiring standar VIP
+        viewController.interactor = interactor
+        viewController.router = router
+
+        // 4. Sambungkan Interactor → Presenter (lewat actor boundary)
+        Task {
+            await interactor.setPresenter(presenter)
+        }
+
+        // 5. Sambungkan Router
+        router.viewController = viewController
+        router.dataStore = interactor
+
+        return viewController
+    }
+}
+```
+
+### Alur Data Lengkap (Observable VIP)
+
+```
+1. viewDidLoad → startObserving() → withObservationTracking terdaftar
+   └─ fetchUsers() → Task { await interactor.fetchUsers() }
+
+2. Interactor.fetchUsers() [actor]
+   ├─ await presenter.presentLoading(true)
+   │   └─ displayState.isLoading = true ←── withObservationTracking fires
+   │       └─ applyState(): activityIndicator.startAnimating()
+   │
+   ├─ let users = try await worker.fetchUsers()
+   │
+   ├─ await presenter.presentUsers(response)
+   │   └─ displayState.displayedUsers = [...] ←── fires
+   │       └─ applyState(): tableView.reloadData()
+   │
+   └─ await presenter.presentLoading(false)
+       └─ displayState.isLoading = false ←── fires
+           └─ applyState(): activityIndicator.stopAnimating()
+
+3. User tap cell → interactor.selectUser()
+   └─ presenter.presentSelectedUser(response)
+       └─ displayState.pendingNavigation = ViewModel(...) ←── fires
+           └─ applyState():
+               displayState.pendingNavigation = nil  (reset)
+               router.routeToUserDetail(...)
+```
+
+---
+
+## 18. Trade-offs: Pure VIP vs Observable VIP
+
+Ini adalah inti dari pertanyaan yang sering muncul ketika mempertimbangkan migrasi. Tidak ada jawaban mutlak — setiap trade-off bergantung pada konteks project.
+
+---
+
+### Trade-off 1: Commands vs State — Masalah One-time Events
+
+Ini adalah **trade-off terbesar** dan paling sering menjadi sumber bug tersembunyi.
+
+**Pure VIP — Presenter berbicara dalam "commands":**
+
+```swift
+// Ini adalah PERINTAH — dipanggil sekali, dieksekusi sekali, selesai.
+viewController?.displayError(message: "Koneksi gagal")
+// Tidak ada state yang tersimpan — tidak mungkin error ini muncul lagi
+// kecuali Presenter memanggil displayError() lagi.
+```
+
+**Observable VIP — Presenter berbicara dalam "state":**
+
+```swift
+// Ini adalah STATE — disimpan di displayState.pendingError
+displayState.pendingError = "Koneksi gagal"
+
+// Masalah: applyState() bisa dipanggil lagi oleh perubahan property LAIN.
+// Misal: isLoading berubah → applyState() → pendingError masih ada → double alert!
+//
+// Solusi wajib: reset SEGERA setelah dikonsumsi.
+if let message = state.pendingError {
+    displayState?.pendingError = nil   // ← WAJIB, atau bug
+    showErrorAlert(message: message)
+}
+```
+
+**Mengapa ini berbahaya:** Programmer yang tidak familiar dengan pola ini akan lupa me-reset `pendingError`. Hasilnya: alert error muncul setiap kali ada perubahan state lain — bug yang sangat sulit di-reproduce karena hanya terjadi saat ada perubahan bersamaan.
+
+**Solusi lebih defensif — EventQueue:**
+
+```swift
+// Alternatif: bungkus one-time event dalam wrapper yang auto-consume
+@Observable
+@MainActor
+final class UserListDisplayState {
+    var displayedUsers: [UserList.FetchUsers.ViewModel.DisplayedUser] = []
+    var isLoading: Bool = false
+
+    // Gunakan array sebagai queue — multiple events tidak saling menimpa
+    private(set) var errorQueue: [String] = []
+    private(set) var navigationQueue: [UserList.SelectUser.ViewModel] = []
+
+    // Hanya Presenter yang boleh enqueue
+    fileprivate func enqueueError(_ message: String) {
+        errorQueue.append(message)
+    }
+
+    fileprivate func enqueueNavigation(_ viewModel: UserList.SelectUser.ViewModel) {
+        navigationQueue.append(viewModel)
+    }
+
+    // ViewController yang dequeue saat mengkonsumsi
+    func dequeueError() -> String? {
+        guard !errorQueue.isEmpty else { return nil }
+        return errorQueue.removeFirst()
+    }
+
+    func dequeueNavigation() -> UserList.SelectUser.ViewModel? {
+        guard !navigationQueue.isEmpty else { return nil }
+        return navigationQueue.removeFirst()
+    }
+}
+
+// applyState() lebih aman:
+private func applyState() {
+    guard let state = displayState else { return }
+    // ...regular state...
+
+    // Queue — ambil semua yang pending
+    while let message = state.dequeueError() {
+        showErrorAlert(message: message)
+    }
+    while let nav = state.dequeueNavigation() {
+        router?.routeToUserDetail(userId: nav.userId, userName: nav.userName)
+    }
+}
+```
+
+---
+
+### Trade-off 2: Ownership & Retain Cycle
+
+**Pure VIP:**
+
+```
+Configurator: presenter.viewController = viewController  (strong)
+                        ↑
+Agar tidak retain cycle, harus weak:
+Presenter: weak var viewController: (any UserListDisplayLogic)?
+                                    ↑
+Jika lupa weak → retain cycle → memory leak yang sulit dideteksi
+Jika weak → viewController bisa nil saat dipanggil → silent failure
+```
+
+**Observable VIP:**
+
+```
+Presenter: let displayState = UserListDisplayState()  (owns)
+ViewController: var displayState: UserListDisplayState?  (non-owning reference, tidak retain Presenter)
+
+Ownership linear: Presenter → DisplayState ← ViewController
+Tidak ada circular reference. Tidak ada yang perlu weak.
+Configurator: viewController.configure(displayState: presenter.displayState)
+              presenter TIDAK tahu keberadaan ViewController — DI lebih bersih.
+```
+
+**Pemenang: Observable VIP** — model ownership lebih jelas, tidak ada footgun `weak` yang bisa dilupakan.
+
+---
+
+### Trade-off 3: Explicitness vs Reactivity — Debugging
+
+**Pure VIP — sangat mudah di-debug:**
+
+```swift
+// Stack trace saat error muncul di layar:
+// 1. UserListInteractor.fetchUsers() — throw
+// 2. UserListPresenter.presentError(_:) ← breakpoint di sini
+// 3. UserListViewController.displayError(message:) ← atau di sini
+// Jelas, linear, mudah di-trace
+```
+
+**Observable VIP — lebih implisit:**
+
+```swift
+// Stack trace saat applyState() dipanggil:
+// 1. withObservationTracking.onChange ← dipanggil oleh runtime
+// 2. continuation.yield(())
+// 3. AsyncStream for-await loop
+// 4. self?.applyState()  ← breakpoint di sini, tapi TIDAK JELAS property mana yang berubah
+
+// Untuk mengetahui property mana yang trigger, harus tambahkan logging manual:
+private func applyState() {
+    guard let state = displayState else { return }
+    // Debugging: print apa yang berubah
+    // (ini tidak bisa otomatis karena withObservationTracking tidak memberitahu PROPERTY mana)
+    if state.displayedUsers != currentDisplayedUsers { print("users changed") }
+    if state.isLoading { print("loading changed") }
+    // ...
+}
+```
+
+**Pemenang: Pure VIP** — data flow eksplisit dan deterministik lebih mudah di-debug, terutama saat onboarding developer baru ke codebase.
+
+---
+
+### Trade-off 4: Testing Presenter
+
+**Pure VIP — butuh Mock ViewController:**
+
+```swift
+// Mock yang harus dibuat hanya untuk test
+@MainActor
+final class MockUserListViewController: UserListDisplayLogic {
+    var displayedUsers: [UserList.FetchUsers.ViewModel.DisplayedUser] = []
+    var loadingStates: [Bool] = []
+    var errorMessages: [String] = []
+
+    func displayUsers(_ viewModel: UserList.FetchUsers.ViewModel) {
+        displayedUsers = viewModel.displayedUsers
+    }
+    func displayLoading(_ isLoading: Bool) { loadingStates.append(isLoading) }
+    func displayError(message: String) { errorMessages.append(message) }
+    func displaySelectedUser(_ viewModel: UserList.SelectUser.ViewModel) {}
+}
+
+// Test
+@Test func testPresentUsers() async {
+    let mockVC = MockUserListViewController()
+    let presenter = UserListPresenter()
+    presenter.viewController = mockVC
+
+    let response = UserList.FetchUsers.Response(users: [User(id: "1", name: "Ari", email: "a@b.com", avatarURL: nil)])
+    presenter.presentUsers(response)
+
+    #expect(mockVC.displayedUsers.first?.fullName == "Ari")
+}
+```
+
+**Observable VIP — test langsung dari displayState:**
+
+```swift
+// Tidak perlu mock apapun — cukup cek state
+@Test func testPresentUsers() async {
+    let presenter = UserListPresenter()
+
+    let response = UserList.FetchUsers.Response(users: [User(id: "1", name: "ari supriatna", email: "a@b.com", avatarURL: nil)])
+    await MainActor.run { presenter.presentUsers(response) }
+
+    // Assert langsung ke displayState — lebih intuitif
+    let users = await MainActor.run { presenter.displayState.displayedUsers }
+    #expect(users.first?.fullName == "Ari Supriatna")  // test format capitalize
+    #expect(users.first?.emailLabel == "a@b.com")
+}
+```
+
+**Pemenang: Observable VIP** — test Presenter jauh lebih simpel, tidak ada mock infrastructure yang perlu di-maintain.
+
+---
+
+### Trade-off 5: Testing ViewController
+
+**Pure VIP — inject viewModel langsung:**
+
+```swift
+// Test display logic VC dengan memanggil method langsung
+@Test @MainActor func testDisplayUsersUpdatesTable() {
+    let vc = UserListViewController()
+    vc.loadViewIfNeeded()
+
+    let viewModel = UserList.FetchUsers.ViewModel(displayedUsers: [
+        .init(id: "1", fullName: "Ari Supriatna", emailLabel: "ari@test.com", avatarURL: nil)
+    ])
+    vc.displayUsers(viewModel)  // panggil langsung — synchronous
+
+    #expect(vc.tableView.numberOfRows(inSection: 0) == 1)
+}
+```
+
+**Observable VIP — harus tunggu observasi async:**
+
+```swift
+// Harus setup displayState dan tunggu observation cycle
+@Test @MainActor func testDisplayUsersUpdatesTable() async {
+    let displayState = UserListDisplayState()
+    let vc = UserListViewController()
+    vc.configure(displayState: displayState)
+    vc.loadViewIfNeeded()
+
+    // Harus tunggu observasi selesai setup
+    try? await Task.sleep(for: .milliseconds(50))
+
+    displayState.displayedUsers = [
+        .init(id: "1", fullName: "Ari Supriatna", emailLabel: "ari@test.com", avatarURL: nil)
+    ]
+
+    // Harus tunggu observation cycle dan applyState() dipanggil
+    try? await Task.sleep(for: .milliseconds(50))
+
+    #expect(vc.tableView.numberOfRows(inSection: 0) == 1)
+}
+```
+
+**Pemenang: Pure VIP** — test ViewController lebih deterministic karena synchronous. Observable VIP membutuhkan `Task.sleep` yang rapuh (flaky test risk).
+
+---
+
+### Trade-off 6: iOS Minimum Version
+
+| Fitur | Minimum |
+|---|---|
+| `async/await`, `actor`, `@MainActor` | iOS 15 |
+| `@Observable`, `withObservationTracking` | **iOS 17** |
+
+Jika project mendukung iOS 15 atau 16, Observable VIP **tidak bisa digunakan** sama sekali. Pure VIP dengan Swift Concurrency tetap berjalan di iOS 15.
+
+---
+
+### Trade-off 7: Jumlah `applyState()` Call
+
+Dalam Pure VIP, setiap `presentLoading`, `presentUsers`, `presentLoading(false)` adalah 3 pemanggilan terpisah dan independen.
+
+Dalam Observable VIP, setiap assignment ke `displayState` memicu `onChange` → yield → `applyState()`. Artinya untuk satu fetch yang berhasil:
+
+```
+1. displayState.isLoading = true       → applyState() #1
+2. displayState.displayedUsers = [...]  → applyState() #2
+3. displayState.isLoading = false      → applyState() #3
+```
+
+Tiga kali `applyState()` untuk satu fetch — tapi `tableView.reloadData()` hanya terjadi sekali (karena ada guard `users != currentDisplayedUsers`). Overhead-nya kecil dan tidak terasa di UI, tapi perlu disadari.
+
+---
+
+### Ringkasan Trade-offs
+
+| Aspek | Pure VIP | Observable VIP |
+|---|---|---|
+| **One-time events** | ✅ Natural (commands) | ⚠️ Butuh reset manual — footgun |
+| **Retain cycle** | ⚠️ Perlu `weak` hati-hati | ✅ Tidak ada retain cycle |
+| **Debugging** | ✅ Linear, mudah trace | ⚠️ Implicit, butuh logging tambahan |
+| **Test Presenter** | ⚠️ Butuh Mock VC | ✅ Langsung cek state |
+| **Test ViewController** | ✅ Synchronous, deterministic | ⚠️ Async, risiko flaky test |
+| **iOS minimum** | ✅ iOS 15 | ❌ iOS 17 only |
+| **Call applyState** | N/A | ⚠️ 3x per fetch (overhead kecil) |
+| **Onboarding developer** | ✅ Mudah — flow eksplisit | ⚠️ Perlu paham Observable |
+| **DI / coupling** | ⚠️ Presenter tahu VC | ✅ Presenter tidak tahu VC |
+
+### Kapan Pilih Observable VIP?
+
+**Pilih Observable VIP jika:**
+- Target minimum iOS 17+
+- Tim sudah familiar dengan `@Observable` dan Swift Concurrency
+- Test coverage lebih difokuskan ke Presenter (business/formatting logic) daripada VC
+- Ingin satu pattern yang sama antara UIKit dan SwiftUI (karena Observable bekerja di keduanya)
+- Project baru — tidak ada legacy VIP code yang perlu di-maintain
+
+**Tetap dengan Pure VIP jika:**
+- Target iOS 15 atau 16
+- Tim lebih besar dan beragam level — explicitness Pure VIP lebih mudah onboarding
+- Test suite banyak di ViewController level (integration test UIKit)
+- Sudah ada codebase Pure VIP yang besar — ROI migrasi tidak sebanding
+- Debugging adalah prioritas — stack trace eksplisit lebih berharga
 
 ---
 
