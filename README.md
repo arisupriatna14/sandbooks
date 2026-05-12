@@ -13,6 +13,7 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 | 1 | [swift-concurrency-complete.md](swift-concurrency-complete.md) | Panduan lengkap Swift Concurrency dari Swift 5.5 hingga Swift 6.2 — `async/await`, `Task`, `actor`, `AsyncStream`, dan semua fitur baru di tiap versi |
 | 2 | [swift-isolation-swift6.md](swift-isolation-swift6.md) | Deep dive Swift Isolation — isolation domain, `@MainActor`, `Sendable`, `nonisolated`, region-based isolation, dan migration guide Swift 5 → Swift 6 |
 | 3 | [swift-isolation-vip-uikit.md](swift-isolation-vip-uikit.md) | Contoh praktis VIP (View–Interactor–Presenter) di UIKit dengan Swift Isolation, dilengkapi Task Cancellation, `async let`, `TaskGroup`, `AsyncStream`, dan `withCheckedContinuation` |
+| 4 | [swift-concurrency-swift5x.md](swift-concurrency-swift5x.md) | Adopsi Swift Concurrency di project Swift 5.x — semua API (`async/await`, `actor`, `Sendable`, `AsyncStream`, `Continuation`), implementasi VIP UIKit, migration guide GCD → async/await, tips & best practices |
 
 ---
 
@@ -20,10 +21,10 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 
 | # | File | Topik |
 |---|---|---|
-| 4 | [swift6-typed-throws.md](swift6-typed-throws.md) | Typed Throws — `throws(ErrorType)`, generic throws, menghilangkan overhead existential boxing pada error handling |
-| 5 | [swift6-noncopyable-types.md](swift6-noncopyable-types.md) | Noncopyable Types (`~Copyable`) — move semantics, RAII pattern, `consuming`/`borrowing`, garansi `deinit` |
-| 6 | [swift6-borrowing-consuming.md](swift6-borrowing-consuming.md) | Borrowing & Consuming parameter modifiers — eliminasi copy yang tidak perlu, ownership semantics, performa tanpa `inout` |
-| 7 | [swift6-pack-iteration.md](swift6-pack-iteration.md) | Parameter Packs & Pack Iteration — type-safe variadic generics, `for value in repeat each values`, compile-time unrolling |
+| 5 | [swift6-typed-throws.md](swift6-typed-throws.md) | Typed Throws — `throws(ErrorType)`, generic throws, menghilangkan overhead existential boxing pada error handling |
+| 6 | [swift6-noncopyable-types.md](swift6-noncopyable-types.md) | Noncopyable Types (`~Copyable`) — move semantics, RAII pattern, `consuming`/`borrowing`, garansi `deinit` |
+| 7 | [swift6-borrowing-consuming.md](swift6-borrowing-consuming.md) | Borrowing & Consuming parameter modifiers — eliminasi copy yang tidak perlu, ownership semantics, performa tanpa `inout` |
+| 8 | [swift6-pack-iteration.md](swift6-pack-iteration.md) | Parameter Packs & Pack Iteration — type-safe variadic generics, `for value in repeat each values`, compile-time unrolling |
 
 ---
 
@@ -31,7 +32,7 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 
 | # | File | Topik |
 |---|---|---|
-| 8 | [swift6-synchronization.md](swift6-synchronization.md) | Synchronization — `Mutex<Value>`, `Atomic<Value>`, memory ordering, perbandingan performa vs `actor` |
+| 9 | [swift6-synchronization.md](swift6-synchronization.md) | Synchronization — `Mutex<Value>`, `Atomic<Value>`, memory ordering, perbandingan performa vs `actor` |
 
 ---
 
@@ -39,7 +40,7 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 
 | # | File | Topik |
 |---|---|---|
-| 9 | [swift6-observable.md](swift6-observable.md) | Observable — `@Observable` macro, fine-grained dependency tracking, `@Bindable`, `withObservationTracking`, integrasi UIKit, perbandingan dengan `ObservableObject` |
+| 10 | [swift6-observable.md](swift6-observable.md) | Observable — `@Observable` macro, fine-grained dependency tracking, `@Bindable`, `withObservationTracking`, integrasi UIKit, perbandingan dengan `ObservableObject` |
 
 ---
 
@@ -47,9 +48,9 @@ Kumpulan panduan belajar Swift 6 dan Swift Concurrency dalam Bahasa Indonesia. S
 
 | # | File | Topik |
 |---|---|---|
-| 10 | [swift6-swift-testing.md](swift6-swift-testing.md) | Swift Testing — `@Test`, `@Suite`, `#expect`, `#require`, parameterized tests, tags, traits, dan migrasi dari XCTest |
-| 11 | [swift6-package-access-level.md](swift6-package-access-level.md) | Package Access Level — keyword `package`, arsitektur multi-modul SPM, berbagi implementasi antar modul tanpa ekspos ke publik |
-| 12 | [swift6-conditional-compilation.md](swift6-conditional-compilation.md) | Conditional Compilation — menggunakan fitur Swift 6 di project Swift 5, strategi migrasi bertahap 5 fase, compatibility layer |
+| 11 | [swift6-swift-testing.md](swift6-swift-testing.md) | Swift Testing — `@Test`, `@Suite`, `#expect`, `#require`, parameterized tests, tags, traits, dan migrasi dari XCTest |
+| 12 | [swift6-package-access-level.md](swift6-package-access-level.md) | Package Access Level — keyword `package`, arsitektur multi-modul SPM, berbagi implementasi antar modul tanpa ekspos ke publik |
+| 13 | [swift6-conditional-compilation.md](swift6-conditional-compilation.md) | Conditional Compilation — menggunakan fitur Swift 6 di project Swift 5, strategi migrasi bertahap 5 fase, compatibility layer |
 
 ---
 
