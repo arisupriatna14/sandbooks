@@ -511,6 +511,124 @@ Actor A ──► [UserDTO: Sendable] ──► Actor B     ✅ Aman
 Actor A ──► [UserObject: class] ──► Actor B     ⚠️  Berbahaya — bisa data race
 ```
 
+### Apa itu "Melewati Batas Actor"?
+
+Batas actor dilewati setiap kali nilai dikirim antar isolation domain yang berbeda —
+ditandai dengan `await` saat memanggil konteks lain.
+
+```
+┌─────────────────────┐        ┌─────────────────────┐
+│  actor Interactor   │        │  @MainActor         │
+│                     │──────▶│  Presenter          │
+│  isolation domain A │  kirim │  isolation domain B │
+└─────────────────────┘  data  └─────────────────────┘
+                           ▲
+                     INI yang disebut
+                    "melewati batas actor"
+```
+
+Struct menjadi **tidak** `Sendable` ketika memiliki properti bertipe **class** yang bukan `Sendable`:
+
+```swift
+// Class biasa — bukan Sendable
+class ImageFilter {
+    var intensity: Double = 1.0
+    var name: String = "vivid"
+}
+
+// Struct ini TIDAK implicitly Sendable
+// karena ImageFilter (class) bukan Sendable
+struct PhotoRequest {
+    let userId: String
+    let filter: ImageFilter  // ← class reference, bukan Sendable
+}
+```
+
+**Tiga skenario melewati batas actor:**
+
+```swift
+// Skenario 1 — dari actor ke @MainActor (via presenter)
+actor PhotoInteractor {
+    weak var presenter: PresenterLogic?
+
+    func upload() async {
+        let request = PhotoRequest(userId: "ari", filter: ImageFilter())
+
+        // ⚠️ Swift 5.x: warning | ❌ Swift 6: error
+        // PhotoRequest melewati batas dari actor → @MainActor
+        await presenter?.present(request: request)
+    }
+}
+
+// Skenario 2 — dari actor ke actor lain
+actor PhotoInteractor {
+    let storage = PhotoStorage()  // actor lain
+
+    func process() async {
+        let request = PhotoRequest(userId: "ari", filter: ImageFilter())
+
+        // ⚠️ Swift 5.x: warning | ❌ Swift 6: error
+        // PhotoRequest melewati batas dari PhotoInteractor → PhotoStorage
+        await storage.save(request)
+    }
+}
+
+// Skenario 3 — capture di dalam Task.detached
+@MainActor
+class ViewController: UIViewController {
+    func upload() {
+        let request = PhotoRequest(userId: "ari", filter: ImageFilter())
+
+        Task.detached {
+            // ⚠️ Swift 5.x: warning | ❌ Swift 6: error
+            // capture PhotoRequest dari @MainActor ke Task.detached (no isolation)
+            await uploadService.send(request)
+        }
+    }
+}
+```
+
+**Yang TIDAK dianggap melewati batas** — dipakai di dalam isolation domain yang sama:
+
+```swift
+actor PhotoInteractor {
+    func process() async {
+        let request = PhotoRequest(userId: "ari", filter: ImageFilter())
+
+        // ✅ Tidak error — dipakai di dalam actor yang sama
+        print(request.userId)
+        validate(request)
+    }
+
+    func validate(_ r: PhotoRequest) { ... }  // masih di actor ini
+}
+```
+
+**Solusi:**
+
+```swift
+// Opsi 1 — ubah class jadi struct (paling direkomendasikan)
+struct ImageFilter: Sendable {
+    var intensity: Double = 1.0
+    var name: String = "vivid"
+}
+
+struct PhotoRequest: Sendable {
+    let userId: String
+    let filter: ImageFilter  // ✅ struct Sendable
+}
+
+// Opsi 2 — jika class tidak bisa diubah, final + semua properti immutable
+final class ImageFilter: @unchecked Sendable {
+    let intensity: Double  // let — tidak bisa diubah setelah init
+    let name: String
+    init(intensity: Double, name: String) {
+        self.intensity = intensity
+        self.name = name
+    }
+}
+```
+
 ### Sendable Otomatis
 
 ```swift
